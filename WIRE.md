@@ -1,5 +1,9 @@
 # Media-object binary envelope v1
 
+This file specifies only the immutable `MOBJ` binary envelope. The separate
+media-control v1 JSON contracts do not add fields to, or reinterpret, this wire
+version.
+
 This document fixes the canonical byte representation for wire version 1. All
 integers use network byte order (big-endian). All strings are UTF-8. Byte counts
 measure encoded UTF-8 bytes.

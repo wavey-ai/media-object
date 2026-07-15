@@ -15,6 +15,31 @@ secondary parent supplying repair symbols, a reliable fetch, or local cache. A
 relay can therefore deduplicate and verify the same object across both paths in
 the dual-parent DAG.
 
+## Media-control v1
+
+The crate also exposes strict JSON types for the control-plane boundary:
+
+- `SessionMediaIdentityV1` is the complete tenant/session/participant/endpoint/
+  contributor namespace with class-specific source, audience, or take scope;
+- `MediaCapabilityClaimsV1` distinguishes session incarnation, session-wide
+  authorization, per-subject grant, policy, optional class authorization,
+  binding, and topology generations;
+- `MediaEndpointDescriptorV1` is a closed, HTTPS-only route locator with no
+  token, key, header, cookie, query value, or arbitrary parameter map.
+
+Opaque IDs are typed, bounded ASCII tokens. Constructors canonicalize set-like
+scopes; JSON input must already use canonical ordering and rejects unknown
+fields. The bounded `from_json_slice` entry points reject objects above 64 KiB
+before parsing; network consumers should use those entry points rather than
+calling Serde directly. `authorize` compares claims with authenticated current verifier state,
+including exact generations and a maximum five-second clock-skew allowance.
+Capability lifetime is capped at 90 seconds. Signature/header, key selection,
+and replay checks remain the issuer/verifier's responsibility and happen before
+claims authorization.
+
+Core values and IDs use redacted `Debug` output. Explicit serialization and
+identifier `as_str()` access are trust-boundary operations.
+
 ## Model
 
 Each `MediaObject` carries:
@@ -104,7 +129,10 @@ The object format remains route-neutral: either parent can deliver source or
 repair data for the same verifiable identity, while object semantics remain
 stable across routing generations.
 
-The precise field order and compatibility rules live in [WIRE.md](WIRE.md).
+The precise binary-object field order and compatibility rules live in
+[WIRE.md](WIRE.md). Media-control JSON schemas and the cross-language fixture
+corpus live in the adjacent `io.infidelity.docs/specs/media-control/v1`
+repository.
 
 ## Development
 
