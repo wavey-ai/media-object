@@ -1,0 +1,20 @@
+[package]
+name = "media-object"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "MIT"
+description = "Canonical, bounded media-object v1 model for Wavey relay and cache services"
+repository = "https://github.com/wavey-ai/media-object"
+readme = "README.md"
+
+[dependencies]
+sha2 = "0.10"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+
