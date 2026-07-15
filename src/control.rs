@@ -1,9 +1,10 @@
 //! Strict JSON contracts for media-control v1.
 //!
 //! These types are separate from the immutable `MOBJ` binary envelope. They
-//! describe authorization identity, capability claims, and non-authorizing
-//! endpoint routing data. Deserialization rejects unknown fields and invalid
-//! combinations; constructors canonicalize set-like scopes.
+//! describe authorization identity, capability claims, non-authorizing
+//! endpoint routing data, and the authenticated configuration behind compact
+//! high-rate frame references. Deserialization rejects unknown fields and
+//! invalid combinations; constructors canonicalize set-like scopes.
 
 use std::fmt;
 use std::str::FromStr;
@@ -546,6 +547,13 @@ impl MediaAuthorizationFactV1 {
         validate_unix_seconds("evaluated_at", params.evaluated_at)?;
         if let Some(access_expires_at) = params.access_expires_at {
             validate_unix_seconds("access_expires_at", access_expires_at)?;
+            if access_expires_at <= params.evaluated_at {
+                return Err(MediaControlError::new(
+                    MediaControlErrorCode::InvalidTimestamp,
+                    "access_expires_at",
+                    "access expiry must be later than authorization evaluation",
+                ));
+            }
         }
         canonicalize_operation_set(&mut params.allowed_operations)?;
         canonicalize_media_class_set(&mut params.allowed_media_classes)?;

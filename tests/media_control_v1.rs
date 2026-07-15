@@ -746,6 +746,15 @@ fn authorization_facts_enforce_safe_generations_timestamps_and_semantics() {
         MediaControlErrorCode::InvalidTimestamp
     );
 
+    let mut already_expired = fact_params();
+    already_expired.access_expires_at = Some(already_expired.evaluated_at);
+    assert_eq!(
+        MediaAuthorizationFactV1::new(already_expired)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidTimestamp
+    );
+
     let mut missing_allowed_operation = fact_params();
     missing_allowed_operation
         .allowed_operations
