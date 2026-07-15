@@ -1,8 +1,10 @@
 # Media-object binary envelope v1
 
-This file specifies only the immutable `MOBJ` binary envelope. The separate
-media-control v1 JSON contracts do not add fields to, or reinterpret, this wire
-version.
+This file specifies only the immutable `MOBJ` binary object envelope. The
+separate media-control v1 `MediaFrameConfigurationV1` and
+`MediaFrameEnvelopeV1` contracts govern compact high-rate live frames; they do
+not add fields to, or reinterpret, this object wire version. A carrier may
+transport both, but must identify their framing before decoding either one.
 
 This document fixes the canonical byte representation for wire version 1. All
 integers use network byte order (big-endian). All strings are UTF-8. Byte counts

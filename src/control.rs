@@ -20,6 +20,10 @@ pub const MEDIA_CONTROL_MAX_JSON_BYTES: usize = 64 * 1024;
 pub const MEDIA_CONTROL_MAX_GENERATION: u64 = 9_007_199_254_740_991;
 /// Maximum number of identifiers in one set-like capability scope.
 pub const MEDIA_CONTROL_MAX_SCOPE_IDS: usize = 64;
+/// Largest payload represented by the logical v1 media-frame envelope.
+pub const MEDIA_FRAME_MAX_PAYLOAD_BYTES: u32 = 16 * 1024 * 1024;
+/// Largest exact capture timebase admitted by the v1 frame configuration.
+pub const MEDIA_FRAME_MAX_TIMEBASE_HZ: u32 = 1_000_000_000;
 /// Hard maximum lifetime for any v1 media capability.
 pub const MEDIA_CONTROL_MAX_CAPABILITY_LIFETIME_SECONDS: i64 = 90;
 /// Hard maximum verifier clock-skew allowance.
@@ -62,6 +66,8 @@ pub enum MediaControlErrorCode {
     CapabilityLifetimeExceeded,
     /// A claim does not match the verifier's authenticated context.
     AuthorizationMismatch,
+    /// A compact frame reference does not match its authenticated configuration.
+    ConfigurationMismatch,
     /// The capability is not valid yet.
     NotYetValid,
     /// The capability has expired.
@@ -174,6 +180,7 @@ macro_rules! opaque_id {
 
 opaque_id!(TenantId, "tenant_id");
 opaque_id!(SessionId, "session_id");
+opaque_id!(SubjectId, "subject");
 opaque_id!(ParticipantId, "participant_id");
 opaque_id!(EndpointId, "endpoint_id");
 opaque_id!(ContributorId, "contributor_id");
@@ -183,6 +190,8 @@ opaque_id!(TakeId, "take_id");
 opaque_id!(CapabilityId, "capability_id");
 opaque_id!(EdgeId, "edge_id");
 opaque_id!(DescriptorId, "descriptor_id");
+opaque_id!(AuthorizationFactId, "authorization_fact_id");
+opaque_id!(MediaConfigurationId, "configuration_id");
 
 /// Product workflow selected for a session.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -194,6 +203,18 @@ pub enum SessionWorkflowMode {
     SynchronizedStems,
     /// Source-local durable capture with eventual exact completion.
     FinalTake,
+}
+
+/// Effective identity-policy role carried by an authorization fact.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveRole {
+    /// May consume admitted media and publish only role-specific return media.
+    Listener,
+    /// May additionally contribute admitted program and source media.
+    Contributor,
+    /// May administer and contribute every policy-admitted media class.
+    Producer,
 }
 
 /// Requested or admitted live-monitor representation.
@@ -245,6 +266,587 @@ pub enum MediaEndpointTransport {
 #[serde(rename_all = "snake_case")]
 pub enum MediaCapabilityTokenType {
     MediaCapability,
+}
+
+/// Inputs for constructing a canonical [`MediaAuthorizationRequestV1`].
+#[derive(Clone, Eq, PartialEq)]
+pub struct MediaAuthorizationRequestV1Params {
+    pub subject: SubjectId,
+    pub endpoint_id: EndpointId,
+    pub requested_operation: Operation,
+    pub requested_media_class: MediaClass,
+    pub requested_source_ids: Vec<SourceId>,
+    pub requested_audience_ids: Vec<AudienceId>,
+    pub take_id: Option<TakeId>,
+}
+
+/// Authenticated internal request for an identity-policy authorization fact.
+///
+/// This object contains a raw identity subject and is therefore deliberately
+/// redacted by `Debug`. It is an internal policy input, never a media
+/// credential.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+pub struct MediaAuthorizationRequestV1 {
+    version: u16,
+    subject: SubjectId,
+    endpoint_id: EndpointId,
+    requested_operation: Operation,
+    requested_media_class: MediaClass,
+    requested_source_ids: Vec<SourceId>,
+    requested_audience_ids: Vec<AudienceId>,
+    take_id: Option<TakeId>,
+}
+
+impl MediaAuthorizationRequestV1 {
+    /// Construct a request and canonicalize its set-like scopes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate, oversized, or semantically invalid
+    /// operation/class/take scopes.
+    pub fn new(mut params: MediaAuthorizationRequestV1Params) -> MediaControlResult<Self> {
+        canonicalize_set("requested_source_ids", &mut params.requested_source_ids)?;
+        canonicalize_set("requested_audience_ids", &mut params.requested_audience_ids)?;
+        validate_requested_operation_scope(
+            params.requested_operation,
+            params.requested_media_class,
+            params.take_id.as_ref(),
+            None,
+        )?;
+        Ok(Self {
+            version: MEDIA_CONTROL_VERSION_V1,
+            subject: params.subject,
+            endpoint_id: params.endpoint_id,
+            requested_operation: params.requested_operation,
+            requested_media_class: params.requested_media_class,
+            requested_source_ids: params.requested_source_ids,
+            requested_audience_ids: params.requested_audience_ids,
+            take_id: params.take_id,
+        })
+    }
+
+    /// Parse a bounded, closed v1 JSON request.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation error for malformed, non-canonical, or
+    /// semantically invalid input.
+    pub fn from_json_slice(input: &[u8]) -> MediaControlResult<Self> {
+        require_v1(input)?;
+        let wire: MediaAuthorizationRequestV1Wire =
+            serde_json::from_slice(input).map_err(malformed_json)?;
+        validate_wire_canonical_set("requested_source_ids", &wire.requested_source_ids)?;
+        validate_wire_canonical_set("requested_audience_ids", &wire.requested_audience_ids)?;
+        Self::try_from(wire)
+    }
+
+    /// Encode the deterministic compact JSON fixture representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the JSON serializer fails unexpectedly.
+    pub fn to_canonical_json_vec(&self) -> MediaControlResult<Vec<u8>> {
+        canonical_json(self)
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// Return the authenticated identity subject.
+    ///
+    /// Calling this crosses the request's privacy boundary; routine
+    /// diagnostics should use [`Self::redacted`] instead.
+    #[must_use]
+    pub const fn subject(&self) -> &SubjectId {
+        &self.subject
+    }
+
+    #[must_use]
+    pub const fn endpoint_id(&self) -> &EndpointId {
+        &self.endpoint_id
+    }
+
+    #[must_use]
+    pub const fn requested_operation(&self) -> Operation {
+        self.requested_operation
+    }
+
+    #[must_use]
+    pub const fn requested_media_class(&self) -> MediaClass {
+        self.requested_media_class
+    }
+
+    #[must_use]
+    pub fn requested_source_ids(&self) -> &[SourceId] {
+        &self.requested_source_ids
+    }
+
+    #[must_use]
+    pub fn requested_audience_ids(&self) -> &[AudienceId] {
+        &self.requested_audience_ids
+    }
+
+    #[must_use]
+    pub const fn take_id(&self) -> Option<&TakeId> {
+        self.take_id.as_ref()
+    }
+
+    /// Build the intentionally lossy representation permitted in diagnostics.
+    #[must_use]
+    pub fn redacted(&self) -> RedactedMediaAuthorizationRequestV1 {
+        RedactedMediaAuthorizationRequestV1 {
+            version: self.version,
+            requested_operation: self.requested_operation,
+            requested_media_class: self.requested_media_class,
+            requested_source_count: self.requested_source_ids.len(),
+            requested_audience_count: self.requested_audience_ids.len(),
+            has_take: self.take_id.is_some(),
+        }
+    }
+}
+
+impl fmt::Debug for MediaAuthorizationRequestV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.redacted().fmt(formatter)
+    }
+}
+
+/// Safe diagnostic projection of [`MediaAuthorizationRequestV1`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct RedactedMediaAuthorizationRequestV1 {
+    pub version: u16,
+    pub requested_operation: Operation,
+    pub requested_media_class: MediaClass,
+    pub requested_source_count: usize,
+    pub requested_audience_count: usize,
+    pub has_take: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaAuthorizationRequestV1Wire {
+    version: u16,
+    subject: SubjectId,
+    endpoint_id: EndpointId,
+    requested_operation: Operation,
+    requested_media_class: MediaClass,
+    requested_source_ids: Vec<SourceId>,
+    requested_audience_ids: Vec<AudienceId>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    take_id: Option<TakeId>,
+}
+
+impl<'de> Deserialize<'de> for MediaAuthorizationRequestV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MediaAuthorizationRequestV1Wire::deserialize(deserializer)?;
+        validate_wire_canonical_set("requested_source_ids", &wire.requested_source_ids)
+            .map_err(de::Error::custom)?;
+        validate_wire_canonical_set("requested_audience_ids", &wire.requested_audience_ids)
+            .map_err(de::Error::custom)?;
+        Self::try_from(wire).map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<MediaAuthorizationRequestV1Wire> for MediaAuthorizationRequestV1 {
+    type Error = MediaControlError;
+
+    fn try_from(wire: MediaAuthorizationRequestV1Wire) -> Result<Self, Self::Error> {
+        if wire.version != MEDIA_CONTROL_VERSION_V1 {
+            return Err(unsupported_version());
+        }
+        Self::new(MediaAuthorizationRequestV1Params {
+            subject: wire.subject,
+            endpoint_id: wire.endpoint_id,
+            requested_operation: wire.requested_operation,
+            requested_media_class: wire.requested_media_class,
+            requested_source_ids: wire.requested_source_ids,
+            requested_audience_ids: wire.requested_audience_ids,
+            take_id: wire.take_id,
+        })
+    }
+}
+
+/// Inputs for constructing a canonical [`MediaAuthorizationFactV1`].
+#[derive(Clone, Eq, PartialEq)]
+pub struct MediaAuthorizationFactV1Params {
+    pub authorization_fact_id: AuthorizationFactId,
+    pub session_id: SessionId,
+    pub session_epoch: u64,
+    pub media_authorization_epoch: u64,
+    pub subject_grant_epoch: u64,
+    pub media_policy_version: u64,
+    pub participant_id: ParticipantId,
+    pub endpoint_id: EndpointId,
+    pub effective_role: EffectiveRole,
+    pub access_expires_at: Option<i64>,
+    pub allowed_operations: Vec<Operation>,
+    pub allowed_media_classes: Vec<MediaClass>,
+    pub allowed_source_ids: Vec<SourceId>,
+    pub allowed_audience_ids: Vec<AudienceId>,
+    pub requested_operation: Operation,
+    pub requested_media_class: MediaClass,
+    pub take_id: Option<TakeId>,
+    pub workflow_mode: SessionWorkflowMode,
+    pub evaluated_at: i64,
+}
+
+/// Current identity-policy result returned to an authenticated media controller.
+///
+/// The fact intentionally has no raw identity subject and is not itself a
+/// media credential. All identifiers, private role/scope details, and expiry
+/// values are omitted from its `Debug` representation.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+pub struct MediaAuthorizationFactV1 {
+    version: u16,
+    authorization_fact_id: AuthorizationFactId,
+    session_id: SessionId,
+    session_epoch: u64,
+    media_authorization_epoch: u64,
+    subject_grant_epoch: u64,
+    media_policy_version: u64,
+    participant_id: ParticipantId,
+    endpoint_id: EndpointId,
+    effective_role: EffectiveRole,
+    access_expires_at: Option<i64>,
+    allowed_operations: Vec<Operation>,
+    allowed_media_classes: Vec<MediaClass>,
+    allowed_source_ids: Vec<SourceId>,
+    allowed_audience_ids: Vec<AudienceId>,
+    requested_operation: Operation,
+    requested_media_class: MediaClass,
+    take_id: Option<TakeId>,
+    workflow_mode: SessionWorkflowMode,
+    evaluated_at: i64,
+}
+
+impl MediaAuthorizationFactV1 {
+    /// Construct a fact and canonicalize all set-like scopes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid generations, timestamps, bounds, duplicate
+    /// values, or operation/class/take/workflow combinations.
+    pub fn new(mut params: MediaAuthorizationFactV1Params) -> MediaControlResult<Self> {
+        for (field, generation) in [
+            ("session_epoch", params.session_epoch),
+            (
+                "media_authorization_epoch",
+                params.media_authorization_epoch,
+            ),
+            ("subject_grant_epoch", params.subject_grant_epoch),
+            ("media_policy_version", params.media_policy_version),
+        ] {
+            validate_generation(field, generation)?;
+        }
+        validate_unix_seconds("evaluated_at", params.evaluated_at)?;
+        if let Some(access_expires_at) = params.access_expires_at {
+            validate_unix_seconds("access_expires_at", access_expires_at)?;
+        }
+        canonicalize_operation_set(&mut params.allowed_operations)?;
+        canonicalize_media_class_set(&mut params.allowed_media_classes)?;
+        canonicalize_set("allowed_source_ids", &mut params.allowed_source_ids)?;
+        canonicalize_set("allowed_audience_ids", &mut params.allowed_audience_ids)?;
+        validate_requested_operation_scope(
+            params.requested_operation,
+            params.requested_media_class,
+            params.take_id.as_ref(),
+            Some(params.workflow_mode),
+        )?;
+        if !params
+            .allowed_operations
+            .contains(&params.requested_operation)
+        {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::InvalidCombination,
+                "allowed_operations",
+                "requested operation is absent from the allowed operation set",
+            ));
+        }
+        if !params
+            .allowed_media_classes
+            .contains(&params.requested_media_class)
+        {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::InvalidCombination,
+                "allowed_media_classes",
+                "requested media class is absent from the allowed class set",
+            ));
+        }
+
+        Ok(Self {
+            version: MEDIA_CONTROL_VERSION_V1,
+            authorization_fact_id: params.authorization_fact_id,
+            session_id: params.session_id,
+            session_epoch: params.session_epoch,
+            media_authorization_epoch: params.media_authorization_epoch,
+            subject_grant_epoch: params.subject_grant_epoch,
+            media_policy_version: params.media_policy_version,
+            participant_id: params.participant_id,
+            endpoint_id: params.endpoint_id,
+            effective_role: params.effective_role,
+            access_expires_at: params.access_expires_at,
+            allowed_operations: params.allowed_operations,
+            allowed_media_classes: params.allowed_media_classes,
+            allowed_source_ids: params.allowed_source_ids,
+            allowed_audience_ids: params.allowed_audience_ids,
+            requested_operation: params.requested_operation,
+            requested_media_class: params.requested_media_class,
+            take_id: params.take_id,
+            workflow_mode: params.workflow_mode,
+            evaluated_at: params.evaluated_at,
+        })
+    }
+
+    /// Parse a bounded, closed v1 JSON fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation error for malformed, non-canonical, or
+    /// semantically invalid input.
+    pub fn from_json_slice(input: &[u8]) -> MediaControlResult<Self> {
+        require_v1(input)?;
+        let wire: MediaAuthorizationFactV1Wire =
+            serde_json::from_slice(input).map_err(malformed_json)?;
+        validate_fact_wire_sets(&wire)?;
+        Self::try_from(wire)
+    }
+
+    /// Encode the deterministic compact JSON fixture representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the JSON serializer fails unexpectedly.
+    pub fn to_canonical_json_vec(&self) -> MediaControlResult<Vec<u8>> {
+        canonical_json(self)
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    #[must_use]
+    pub const fn authorization_fact_id(&self) -> &AuthorizationFactId {
+        &self.authorization_fact_id
+    }
+
+    #[must_use]
+    pub const fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    #[must_use]
+    pub const fn session_epoch(&self) -> u64 {
+        self.session_epoch
+    }
+
+    #[must_use]
+    pub const fn media_authorization_epoch(&self) -> u64 {
+        self.media_authorization_epoch
+    }
+
+    #[must_use]
+    pub const fn subject_grant_epoch(&self) -> u64 {
+        self.subject_grant_epoch
+    }
+
+    #[must_use]
+    pub const fn media_policy_version(&self) -> u64 {
+        self.media_policy_version
+    }
+
+    #[must_use]
+    pub const fn participant_id(&self) -> &ParticipantId {
+        &self.participant_id
+    }
+
+    #[must_use]
+    pub const fn endpoint_id(&self) -> &EndpointId {
+        &self.endpoint_id
+    }
+
+    #[must_use]
+    pub const fn effective_role(&self) -> EffectiveRole {
+        self.effective_role
+    }
+
+    #[must_use]
+    pub const fn access_expires_at(&self) -> Option<i64> {
+        self.access_expires_at
+    }
+
+    #[must_use]
+    pub fn allowed_operations(&self) -> &[Operation] {
+        &self.allowed_operations
+    }
+
+    #[must_use]
+    pub fn allowed_media_classes(&self) -> &[MediaClass] {
+        &self.allowed_media_classes
+    }
+
+    #[must_use]
+    pub fn allowed_source_ids(&self) -> &[SourceId] {
+        &self.allowed_source_ids
+    }
+
+    #[must_use]
+    pub fn allowed_audience_ids(&self) -> &[AudienceId] {
+        &self.allowed_audience_ids
+    }
+
+    #[must_use]
+    pub const fn requested_operation(&self) -> Operation {
+        self.requested_operation
+    }
+
+    #[must_use]
+    pub const fn requested_media_class(&self) -> MediaClass {
+        self.requested_media_class
+    }
+
+    #[must_use]
+    pub const fn take_id(&self) -> Option<&TakeId> {
+        self.take_id.as_ref()
+    }
+
+    #[must_use]
+    pub const fn workflow_mode(&self) -> SessionWorkflowMode {
+        self.workflow_mode
+    }
+
+    #[must_use]
+    pub const fn evaluated_at(&self) -> i64 {
+        self.evaluated_at
+    }
+
+    /// Build the intentionally lossy representation permitted in diagnostics.
+    #[must_use]
+    pub fn redacted(&self) -> RedactedMediaAuthorizationFactV1 {
+        RedactedMediaAuthorizationFactV1 {
+            version: self.version,
+            requested_operation: self.requested_operation,
+            requested_media_class: self.requested_media_class,
+            workflow_mode: self.workflow_mode,
+            allowed_operation_count: self.allowed_operations.len(),
+            allowed_media_class_count: self.allowed_media_classes.len(),
+            allowed_source_count: self.allowed_source_ids.len(),
+            allowed_audience_count: self.allowed_audience_ids.len(),
+            has_access_expiry: self.access_expires_at.is_some(),
+            has_take: self.take_id.is_some(),
+        }
+    }
+}
+
+impl fmt::Debug for MediaAuthorizationFactV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.redacted().fmt(formatter)
+    }
+}
+
+/// Safe diagnostic projection of [`MediaAuthorizationFactV1`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct RedactedMediaAuthorizationFactV1 {
+    pub version: u16,
+    pub requested_operation: Operation,
+    pub requested_media_class: MediaClass,
+    pub workflow_mode: SessionWorkflowMode,
+    pub allowed_operation_count: usize,
+    pub allowed_media_class_count: usize,
+    pub allowed_source_count: usize,
+    pub allowed_audience_count: usize,
+    pub has_access_expiry: bool,
+    pub has_take: bool,
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+fn deserialize_absent_or_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaAuthorizationFactV1Wire {
+    version: u16,
+    authorization_fact_id: AuthorizationFactId,
+    session_id: SessionId,
+    session_epoch: u64,
+    media_authorization_epoch: u64,
+    subject_grant_epoch: u64,
+    media_policy_version: u64,
+    participant_id: ParticipantId,
+    endpoint_id: EndpointId,
+    effective_role: EffectiveRole,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    access_expires_at: Option<i64>,
+    allowed_operations: Vec<Operation>,
+    allowed_media_classes: Vec<MediaClass>,
+    allowed_source_ids: Vec<SourceId>,
+    allowed_audience_ids: Vec<AudienceId>,
+    requested_operation: Operation,
+    requested_media_class: MediaClass,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    take_id: Option<TakeId>,
+    workflow_mode: SessionWorkflowMode,
+    evaluated_at: i64,
+}
+
+impl<'de> Deserialize<'de> for MediaAuthorizationFactV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MediaAuthorizationFactV1Wire::deserialize(deserializer)?;
+        validate_fact_wire_sets(&wire).map_err(de::Error::custom)?;
+        Self::try_from(wire).map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<MediaAuthorizationFactV1Wire> for MediaAuthorizationFactV1 {
+    type Error = MediaControlError;
+
+    fn try_from(wire: MediaAuthorizationFactV1Wire) -> Result<Self, Self::Error> {
+        if wire.version != MEDIA_CONTROL_VERSION_V1 {
+            return Err(unsupported_version());
+        }
+        Self::new(MediaAuthorizationFactV1Params {
+            authorization_fact_id: wire.authorization_fact_id,
+            session_id: wire.session_id,
+            session_epoch: wire.session_epoch,
+            media_authorization_epoch: wire.media_authorization_epoch,
+            subject_grant_epoch: wire.subject_grant_epoch,
+            media_policy_version: wire.media_policy_version,
+            participant_id: wire.participant_id,
+            endpoint_id: wire.endpoint_id,
+            effective_role: wire.effective_role,
+            access_expires_at: wire.access_expires_at,
+            allowed_operations: wire.allowed_operations,
+            allowed_media_classes: wire.allowed_media_classes,
+            allowed_source_ids: wire.allowed_source_ids,
+            allowed_audience_ids: wire.allowed_audience_ids,
+            requested_operation: wire.requested_operation,
+            requested_media_class: wire.requested_media_class,
+            take_id: wire.take_id,
+            workflow_mode: wire.workflow_mode,
+            evaluated_at: wire.evaluated_at,
+        })
+    }
 }
 
 /// Inputs for constructing a canonical [`SessionMediaIdentityV1`].
@@ -434,9 +1036,12 @@ struct SessionMediaIdentityV1Wire {
     participant_id: ParticipantId,
     endpoint_id: EndpointId,
     contributor_id: ContributorId,
+    #[serde(default, deserialize_with = "deserialize_absent_or_value")]
     source_id: Option<SourceId>,
     media_class: MediaClass,
+    #[serde(default, deserialize_with = "deserialize_absent_or_value")]
     audience_id: Option<AudienceId>,
+    #[serde(default, deserialize_with = "deserialize_absent_or_value")]
     take_id: Option<TakeId>,
     topology_generation: u64,
 }
@@ -470,6 +1075,536 @@ impl TryFrom<SessionMediaIdentityV1Wire> for SessionMediaIdentityV1 {
             audience_id: wire.audience_id,
             take_id: wire.take_id,
             topology_generation: wire.topology_generation,
+        })
+    }
+}
+
+/// Payload representation selected by an authenticated frame configuration.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaFramePayloadFormat {
+    /// Low-delay Opus packet.
+    Opus,
+    /// Canonical packed signed 24-bit little-endian PCM.
+    PcmS24le,
+    /// A complete FLAC frame or bounded FLAC transport unit.
+    Flac,
+    /// UTF-8 JSON metadata bytes governed by a separate closed schema.
+    Json,
+    /// A format defined only by the authenticated configuration identifier.
+    Opaque,
+}
+
+/// Whether a configured lane may contribute bytes to a recordable output.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCaptureDisposition {
+    /// The lane is eligible for an explicitly authorized recording workflow.
+    Recordable,
+    /// The lane is live-monitor-only and must never enter captured artifacts.
+    MonitorOnly,
+}
+
+/// Inputs for an authenticated [`MediaFrameConfigurationV1`].
+#[derive(Clone, Eq, PartialEq)]
+pub struct MediaFrameConfigurationV1Params {
+    pub configuration_id: MediaConfigurationId,
+    pub binding_generation: u64,
+    pub configuration_ref: u32,
+    pub configuration_epoch: u64,
+    pub identity: SessionMediaIdentityV1,
+    pub payload_format: MediaFramePayloadFormat,
+    pub capture_timebase_hz: u32,
+    pub channel_count: u16,
+    pub max_payload_bytes: u32,
+    pub capture_disposition: MediaCaptureDisposition,
+}
+
+/// Authenticated mapping from a compact frame reference to complete media identity.
+///
+/// High-rate frames carry `binding_generation`, `configuration_ref`, and
+/// `configuration_epoch` rather than repeating opaque identity strings. The
+/// configuration is installed only through an authenticated control boundary;
+/// resolving an envelope against any other mapping fails closed.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+pub struct MediaFrameConfigurationV1 {
+    version: u16,
+    configuration_id: MediaConfigurationId,
+    binding_generation: u64,
+    configuration_ref: u32,
+    configuration_epoch: u64,
+    identity: SessionMediaIdentityV1,
+    payload_format: MediaFramePayloadFormat,
+    capture_timebase_hz: u32,
+    channel_count: u16,
+    max_payload_bytes: u32,
+    capture_disposition: MediaCaptureDisposition,
+}
+
+impl MediaFrameConfigurationV1 {
+    /// Construct and validate a compact frame-reference mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe numeric bounds or a media-class/format/
+    /// recording combination that would weaken the canonical identity.
+    pub fn new(params: MediaFrameConfigurationV1Params) -> MediaControlResult<Self> {
+        validate_generation("binding_generation", params.binding_generation)?;
+        validate_generation("configuration_epoch", params.configuration_epoch)?;
+        if params.configuration_ref == 0 {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::InvalidGeneration,
+                "configuration_ref",
+                "configuration reference must be nonzero",
+            ));
+        }
+        if params.capture_timebase_hz == 0
+            || params.capture_timebase_hz > MEDIA_FRAME_MAX_TIMEBASE_HZ
+        {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::LimitExceeded,
+                "capture_timebase_hz",
+                "capture timebase must be between one and 1000000000",
+            ));
+        }
+        if params.channel_count == 0 || params.channel_count > MAX_CHANNELS {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::LimitExceeded,
+                "channel_count",
+                "channel count must be between one and 128",
+            ));
+        }
+        if params.max_payload_bytes == 0 || params.max_payload_bytes > MEDIA_FRAME_MAX_PAYLOAD_BYTES
+        {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::LimitExceeded,
+                "max_payload_bytes",
+                "frame payload bound must be between one and 16777216 bytes",
+            ));
+        }
+        validate_frame_configuration_semantics(
+            params.identity.media_class(),
+            params.payload_format,
+            params.capture_timebase_hz,
+            params.channel_count,
+            params.capture_disposition,
+        )?;
+        Ok(Self {
+            version: MEDIA_CONTROL_VERSION_V1,
+            configuration_id: params.configuration_id,
+            binding_generation: params.binding_generation,
+            configuration_ref: params.configuration_ref,
+            configuration_epoch: params.configuration_epoch,
+            identity: params.identity,
+            payload_format: params.payload_format,
+            capture_timebase_hz: params.capture_timebase_hz,
+            channel_count: params.channel_count,
+            max_payload_bytes: params.max_payload_bytes,
+            capture_disposition: params.capture_disposition,
+        })
+    }
+
+    /// Parse a bounded, closed v1 JSON configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation error for malformed or invalid input.
+    pub fn from_json_slice(input: &[u8]) -> MediaControlResult<Self> {
+        require_v1(input)?;
+        let wire: MediaFrameConfigurationV1Wire =
+            serde_json::from_slice(input).map_err(malformed_json)?;
+        Self::try_from(wire)
+    }
+
+    /// Encode the deterministic compact JSON representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if serialization fails unexpectedly.
+    pub fn to_canonical_json_vec(&self) -> MediaControlResult<Vec<u8>> {
+        canonical_json(self)
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    #[must_use]
+    pub const fn configuration_id(&self) -> &MediaConfigurationId {
+        &self.configuration_id
+    }
+
+    #[must_use]
+    pub const fn binding_generation(&self) -> u64 {
+        self.binding_generation
+    }
+
+    #[must_use]
+    pub const fn configuration_ref(&self) -> u32 {
+        self.configuration_ref
+    }
+
+    #[must_use]
+    pub const fn configuration_epoch(&self) -> u64 {
+        self.configuration_epoch
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> &SessionMediaIdentityV1 {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn payload_format(&self) -> MediaFramePayloadFormat {
+        self.payload_format
+    }
+
+    #[must_use]
+    pub const fn capture_timebase_hz(&self) -> u32 {
+        self.capture_timebase_hz
+    }
+
+    #[must_use]
+    pub const fn channel_count(&self) -> u16 {
+        self.channel_count
+    }
+
+    #[must_use]
+    pub const fn max_payload_bytes(&self) -> u32 {
+        self.max_payload_bytes
+    }
+
+    #[must_use]
+    pub const fn capture_disposition(&self) -> MediaCaptureDisposition {
+        self.capture_disposition
+    }
+
+    #[must_use]
+    pub const fn redacted(&self) -> RedactedMediaFrameConfigurationV1 {
+        RedactedMediaFrameConfigurationV1 {
+            version: self.version,
+            media_class: self.identity.media_class(),
+            payload_format: self.payload_format,
+            channel_count: self.channel_count,
+            max_payload_bytes: self.max_payload_bytes,
+            capture_disposition: self.capture_disposition,
+        }
+    }
+}
+
+impl fmt::Debug for MediaFrameConfigurationV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.redacted().fmt(formatter)
+    }
+}
+
+/// Value-free diagnostic projection of a media-frame configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct RedactedMediaFrameConfigurationV1 {
+    pub version: u16,
+    pub media_class: MediaClass,
+    pub payload_format: MediaFramePayloadFormat,
+    pub channel_count: u16,
+    pub max_payload_bytes: u32,
+    pub capture_disposition: MediaCaptureDisposition,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaFrameConfigurationV1Wire {
+    version: u16,
+    configuration_id: MediaConfigurationId,
+    binding_generation: u64,
+    configuration_ref: u32,
+    configuration_epoch: u64,
+    identity: SessionMediaIdentityV1,
+    payload_format: MediaFramePayloadFormat,
+    capture_timebase_hz: u32,
+    channel_count: u16,
+    max_payload_bytes: u32,
+    capture_disposition: MediaCaptureDisposition,
+}
+
+impl<'de> Deserialize<'de> for MediaFrameConfigurationV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(MediaFrameConfigurationV1Wire::deserialize(deserializer)?)
+            .map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<MediaFrameConfigurationV1Wire> for MediaFrameConfigurationV1 {
+    type Error = MediaControlError;
+
+    fn try_from(wire: MediaFrameConfigurationV1Wire) -> Result<Self, Self::Error> {
+        if wire.version != MEDIA_CONTROL_VERSION_V1 {
+            return Err(unsupported_version());
+        }
+        Self::new(MediaFrameConfigurationV1Params {
+            configuration_id: wire.configuration_id,
+            binding_generation: wire.binding_generation,
+            configuration_ref: wire.configuration_ref,
+            configuration_epoch: wire.configuration_epoch,
+            identity: wire.identity,
+            payload_format: wire.payload_format,
+            capture_timebase_hz: wire.capture_timebase_hz,
+            channel_count: wire.channel_count,
+            max_payload_bytes: wire.max_payload_bytes,
+            capture_disposition: wire.capture_disposition,
+        })
+    }
+}
+
+/// Inputs for a compact [`MediaFrameEnvelopeV1`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MediaFrameEnvelopeV1Params {
+    pub binding_generation: u64,
+    pub configuration_ref: u32,
+    pub configuration_epoch: u64,
+    pub sequence: u64,
+    pub capture_pts: i64,
+    pub duration_ticks: u32,
+    pub payload_bytes: u32,
+}
+
+/// Compact logical envelope carried by every high-rate media frame.
+///
+/// The envelope is intentionally free of repeated opaque strings. Its three
+/// configuration coordinates must resolve against an authenticated
+/// [`MediaFrameConfigurationV1`], which supplies the exact session epoch,
+/// contributor/source or publisher/audience identity, media class, format, and
+/// capture timebase.
+#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
+pub struct MediaFrameEnvelopeV1 {
+    version: u16,
+    binding_generation: u64,
+    configuration_ref: u32,
+    configuration_epoch: u64,
+    sequence: u64,
+    capture_pts: i64,
+    duration_ticks: u32,
+    payload_bytes: u32,
+}
+
+impl MediaFrameEnvelopeV1 {
+    /// Construct a compact logical frame envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero/out-of-range generations, sequence, PTS,
+    /// duration, or payload length.
+    pub fn new(params: MediaFrameEnvelopeV1Params) -> MediaControlResult<Self> {
+        validate_generation("binding_generation", params.binding_generation)?;
+        validate_generation("configuration_epoch", params.configuration_epoch)?;
+        if params.configuration_ref == 0 {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::InvalidGeneration,
+                "configuration_ref",
+                "configuration reference must be nonzero",
+            ));
+        }
+        if params.sequence > MEDIA_CONTROL_MAX_GENERATION {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::LimitExceeded,
+                "sequence",
+                "sequence must be an exact nonnegative JavaScript integer",
+            ));
+        }
+        validate_signed_exact_integer("capture_pts", params.capture_pts)?;
+        if params.duration_ticks == 0 {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::InvalidCombination,
+                "duration_ticks",
+                "frame duration must be nonzero",
+            ));
+        }
+        if params.payload_bytes == 0 || params.payload_bytes > MEDIA_FRAME_MAX_PAYLOAD_BYTES {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::LimitExceeded,
+                "payload_bytes",
+                "frame payload length must be between one and 16777216 bytes",
+            ));
+        }
+        Ok(Self {
+            version: MEDIA_CONTROL_VERSION_V1,
+            binding_generation: params.binding_generation,
+            configuration_ref: params.configuration_ref,
+            configuration_epoch: params.configuration_epoch,
+            sequence: params.sequence,
+            capture_pts: params.capture_pts,
+            duration_ticks: params.duration_ticks,
+            payload_bytes: params.payload_bytes,
+        })
+    }
+
+    /// Parse a bounded, closed v1 JSON envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable validation error for malformed or invalid input.
+    pub fn from_json_slice(input: &[u8]) -> MediaControlResult<Self> {
+        require_v1(input)?;
+        let wire: MediaFrameEnvelopeV1Wire =
+            serde_json::from_slice(input).map_err(malformed_json)?;
+        Self::try_from(wire)
+    }
+
+    /// Encode the deterministic compact JSON representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if serialization fails unexpectedly.
+    pub fn to_canonical_json_vec(&self) -> MediaControlResult<Vec<u8>> {
+        canonical_json(self)
+    }
+
+    /// Resolve this compact reference against the authenticated configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ConfigurationMismatch` for any coordinate or payload-bound
+    /// mismatch. A caller must not parse or route payload bytes before this
+    /// succeeds.
+    pub fn resolve<'a>(
+        &self,
+        configuration: &'a MediaFrameConfigurationV1,
+    ) -> MediaControlResult<&'a SessionMediaIdentityV1> {
+        for (field, matches) in [
+            (
+                "binding_generation",
+                self.binding_generation == configuration.binding_generation,
+            ),
+            (
+                "configuration_ref",
+                self.configuration_ref == configuration.configuration_ref,
+            ),
+            (
+                "configuration_epoch",
+                self.configuration_epoch == configuration.configuration_epoch,
+            ),
+            (
+                "payload_bytes",
+                self.payload_bytes <= configuration.max_payload_bytes,
+            ),
+        ] {
+            if !matches {
+                return Err(MediaControlError::new(
+                    MediaControlErrorCode::ConfigurationMismatch,
+                    field,
+                    "frame does not match the authenticated configuration",
+                ));
+            }
+        }
+        Ok(&configuration.identity)
+    }
+
+    #[must_use]
+    pub const fn version(&self) -> u16 {
+        self.version
+    }
+
+    #[must_use]
+    pub const fn binding_generation(&self) -> u64 {
+        self.binding_generation
+    }
+
+    #[must_use]
+    pub const fn configuration_ref(&self) -> u32 {
+        self.configuration_ref
+    }
+
+    #[must_use]
+    pub const fn configuration_epoch(&self) -> u64 {
+        self.configuration_epoch
+    }
+
+    #[must_use]
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    #[must_use]
+    pub const fn capture_pts(&self) -> i64 {
+        self.capture_pts
+    }
+
+    #[must_use]
+    pub const fn duration_ticks(&self) -> u32 {
+        self.duration_ticks
+    }
+
+    #[must_use]
+    pub const fn payload_bytes(&self) -> u32 {
+        self.payload_bytes
+    }
+
+    #[must_use]
+    pub const fn redacted(&self) -> RedactedMediaFrameEnvelopeV1 {
+        RedactedMediaFrameEnvelopeV1 {
+            version: self.version,
+            sequence: self.sequence,
+            duration_ticks: self.duration_ticks,
+            payload_bytes: self.payload_bytes,
+        }
+    }
+}
+
+impl fmt::Debug for MediaFrameEnvelopeV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.redacted().fmt(formatter)
+    }
+}
+
+/// Value-free diagnostic projection of a media-frame envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct RedactedMediaFrameEnvelopeV1 {
+    pub version: u16,
+    pub sequence: u64,
+    pub duration_ticks: u32,
+    pub payload_bytes: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MediaFrameEnvelopeV1Wire {
+    version: u16,
+    binding_generation: u64,
+    configuration_ref: u32,
+    configuration_epoch: u64,
+    sequence: u64,
+    capture_pts: i64,
+    duration_ticks: u32,
+    payload_bytes: u32,
+}
+
+impl<'de> Deserialize<'de> for MediaFrameEnvelopeV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::try_from(MediaFrameEnvelopeV1Wire::deserialize(deserializer)?)
+            .map_err(de::Error::custom)
+    }
+}
+
+impl TryFrom<MediaFrameEnvelopeV1Wire> for MediaFrameEnvelopeV1 {
+    type Error = MediaControlError;
+
+    fn try_from(wire: MediaFrameEnvelopeV1Wire) -> Result<Self, Self::Error> {
+        if wire.version != MEDIA_CONTROL_VERSION_V1 {
+            return Err(unsupported_version());
+        }
+        Self::new(MediaFrameEnvelopeV1Params {
+            binding_generation: wire.binding_generation,
+            configuration_ref: wire.configuration_ref,
+            configuration_epoch: wire.configuration_epoch,
+            sequence: wire.sequence,
+            capture_pts: wire.capture_pts,
+            duration_ticks: wire.duration_ticks,
+            payload_bytes: wire.payload_bytes,
         })
     }
 }
@@ -974,21 +2109,25 @@ struct MediaCapabilityClaimsV1Wire {
     media_authorization_epoch: u64,
     subject_grant_epoch: u64,
     media_policy_version: u64,
+    #[serde(default, deserialize_with = "deserialize_absent_or_value")]
     class_authorization_epoch: Option<u64>,
     binding_generation: u64,
     participant_id: ParticipantId,
     endpoint_id: EndpointId,
+    #[serde(default, deserialize_with = "deserialize_absent_or_value")]
     contributor_id: Option<ContributorId>,
     operation: Operation,
     media_class: MediaClass,
     source_ids: Vec<SourceId>,
     audience_ids: Vec<AudienceId>,
+    #[serde(default, deserialize_with = "deserialize_absent_or_value")]
     take_id: Option<TakeId>,
     topology_generation: u64,
     edge_ids: Vec<EdgeId>,
     max_channels: u16,
     max_bitrate: u64,
     max_datagram_bytes: u32,
+    #[serde(default, deserialize_with = "deserialize_absent_or_value")]
     client_key_thumbprint: Option<String>,
     issued_at: i64,
     not_before: i64,
@@ -1332,6 +2471,94 @@ fn validate_generation(field: &'static str, value: u64) -> MediaControlResult<()
     Ok(())
 }
 
+fn validate_signed_exact_integer(field: &'static str, value: i64) -> MediaControlResult<()> {
+    if !(-MAX_EXACT_UNIX_SECONDS..=MAX_EXACT_UNIX_SECONDS).contains(&value) {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::LimitExceeded,
+            field,
+            "value must be an exact signed JavaScript integer",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_frame_configuration_semantics(
+    media_class: MediaClass,
+    payload_format: MediaFramePayloadFormat,
+    capture_timebase_hz: u32,
+    channel_count: u16,
+    capture_disposition: MediaCaptureDisposition,
+) -> MediaControlResult<()> {
+    let format_allowed = match media_class {
+        MediaClass::Program | MediaClass::Source => matches!(
+            payload_format,
+            MediaFramePayloadFormat::Opus
+                | MediaFramePayloadFormat::PcmS24le
+                | MediaFramePayloadFormat::Flac
+                | MediaFramePayloadFormat::Opaque
+        ),
+        MediaClass::Talkback => payload_format == MediaFramePayloadFormat::Opus,
+        MediaClass::Screen => payload_format == MediaFramePayloadFormat::Opaque,
+        MediaClass::Metadata => matches!(
+            payload_format,
+            MediaFramePayloadFormat::Json | MediaFramePayloadFormat::Opaque
+        ),
+        MediaClass::TakeChunk => matches!(
+            payload_format,
+            MediaFramePayloadFormat::PcmS24le
+                | MediaFramePayloadFormat::Flac
+                | MediaFramePayloadFormat::Opaque
+        ),
+    };
+    if !format_allowed {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            "payload_format",
+            "payload format is not valid for the configured media class",
+        ));
+    }
+    if payload_format == MediaFramePayloadFormat::Opus && capture_timebase_hz != 48_000 {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            "capture_timebase_hz",
+            "Opus capture PTS uses the fixed 48000 Hz timebase",
+        ));
+    }
+    if payload_format == MediaFramePayloadFormat::Json && channel_count != 1 {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            "channel_count",
+            "JSON metadata uses one logical channel",
+        ));
+    }
+    if media_class == MediaClass::Talkback {
+        if channel_count != 1 {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::InvalidCombination,
+                "channel_count",
+                "talkback v1 is mono",
+            ));
+        }
+        if capture_disposition != MediaCaptureDisposition::MonitorOnly {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::InvalidCombination,
+                "capture_disposition",
+                "talkback is always monitor-only",
+            ));
+        }
+    }
+    if media_class == MediaClass::TakeChunk
+        && capture_disposition != MediaCaptureDisposition::Recordable
+    {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            "capture_disposition",
+            "take chunks are recordable artifacts",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_bounded_text(
     field: &'static str,
     value: &str,
@@ -1451,6 +2678,156 @@ fn validate_wire_canonical_set<T: Ord>(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn canonicalize_operation_set(values: &mut [Operation]) -> MediaControlResult<()> {
+    canonicalize_ranked_set("allowed_operations", values, 5, operation_canonical_rank)
+}
+
+fn canonicalize_media_class_set(values: &mut [MediaClass]) -> MediaControlResult<()> {
+    canonicalize_ranked_set(
+        "allowed_media_classes",
+        values,
+        6,
+        media_class_canonical_rank,
+    )
+}
+
+fn canonicalize_ranked_set<T: Copy + Eq>(
+    field: &'static str,
+    values: &mut [T],
+    maximum: usize,
+    rank: fn(T) -> u8,
+) -> MediaControlResult<()> {
+    validate_nonempty_set_bound(field, values.len(), maximum)?;
+    values.sort_unstable_by_key(|value| rank(*value));
+    if values.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::DuplicateValue,
+            field,
+            "scope contains a duplicate value",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_wire_canonical_ranked_set<T: Copy + Eq>(
+    field: &'static str,
+    values: &[T],
+    maximum: usize,
+    rank: fn(T) -> u8,
+) -> MediaControlResult<()> {
+    validate_nonempty_set_bound(field, values.len(), maximum)?;
+    for pair in values.windows(2) {
+        let left = rank(pair[0]);
+        let right = rank(pair[1]);
+        if left == right {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::DuplicateValue,
+                field,
+                "scope contains a duplicate value",
+            ));
+        }
+        if left > right {
+            return Err(MediaControlError::new(
+                MediaControlErrorCode::NonCanonicalOrder,
+                field,
+                "scope is not in canonical ascending order",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_nonempty_set_bound(
+    field: &'static str,
+    length: usize,
+    maximum: usize,
+) -> MediaControlResult<()> {
+    if length == 0 {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            field,
+            "scope must contain at least one value",
+        ));
+    }
+    if length > maximum {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::LimitExceeded,
+            field,
+            "scope exceeds the complete v1 enum vocabulary",
+        ));
+    }
+    Ok(())
+}
+
+const fn operation_canonical_rank(operation: Operation) -> u8 {
+    match operation {
+        Operation::AcknowledgePlayout => 0,
+        Operation::Publish => 1,
+        Operation::ReadTake => 2,
+        Operation::Subscribe => 3,
+        Operation::UploadTake => 4,
+    }
+}
+
+const fn media_class_canonical_rank(media_class: MediaClass) -> u8 {
+    match media_class {
+        MediaClass::Metadata => 0,
+        MediaClass::Program => 1,
+        MediaClass::Screen => 2,
+        MediaClass::Source => 3,
+        MediaClass::TakeChunk => 4,
+        MediaClass::Talkback => 5,
+    }
+}
+
+fn validate_fact_wire_sets(wire: &MediaAuthorizationFactV1Wire) -> MediaControlResult<()> {
+    validate_wire_canonical_ranked_set(
+        "allowed_operations",
+        &wire.allowed_operations,
+        5,
+        operation_canonical_rank,
+    )?;
+    validate_wire_canonical_ranked_set(
+        "allowed_media_classes",
+        &wire.allowed_media_classes,
+        6,
+        media_class_canonical_rank,
+    )?;
+    validate_wire_canonical_set("allowed_source_ids", &wire.allowed_source_ids)?;
+    validate_wire_canonical_set("allowed_audience_ids", &wire.allowed_audience_ids)
+}
+
+fn validate_requested_operation_scope(
+    operation: Operation,
+    media_class: MediaClass,
+    take_id: Option<&TakeId>,
+    workflow_mode: Option<SessionWorkflowMode>,
+) -> MediaControlResult<()> {
+    if !operation_allows_media_class(operation, media_class) {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            "requested_operation",
+            "requested operation is not defined for this media class",
+        ));
+    }
+    let take_operation = matches!(operation, Operation::UploadTake | Operation::ReadTake);
+    if take_operation != take_id.is_some() {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            "take_id",
+            "take operations require an exact take ID and live operations forbid one",
+        ));
+    }
+    if take_operation && workflow_mode.is_some_and(|mode| mode != SessionWorkflowMode::FinalTake) {
+        return Err(MediaControlError::new(
+            MediaControlErrorCode::InvalidCombination,
+            "workflow_mode",
+            "take operations require the final_take workflow",
+        ));
     }
     Ok(())
 }

@@ -1,9 +1,14 @@
 use media_object::{
-    AudienceId, CapabilityId, ContributorId, DescriptorId, EdgeId, EndpointId,
-    MediaCapabilityClaimsV1, MediaCapabilityClaimsV1Params, MediaCapabilityValidationContextV1,
-    MediaClass, MediaControlErrorCode, MediaEndpointDescriptorV1, MediaEndpointDescriptorV1Params,
-    MediaEndpointTransport, Operation, ParticipantId, SessionId, SessionMediaIdentityV1,
-    SessionMediaIdentityV1Params, SourceId, TenantId,
+    AudienceId, AuthorizationFactId, CapabilityId, ContributorId, DescriptorId, EdgeId,
+    EffectiveRole, EndpointId, MediaAuthorizationFactV1, MediaAuthorizationFactV1Params,
+    MediaAuthorizationRequestV1, MediaAuthorizationRequestV1Params, MediaCapabilityClaimsV1,
+    MediaCapabilityClaimsV1Params, MediaCapabilityValidationContextV1, MediaCaptureDisposition,
+    MediaClass, MediaConfigurationId, MediaControlErrorCode, MediaEndpointDescriptorV1,
+    MediaEndpointDescriptorV1Params, MediaEndpointTransport, MediaFrameConfigurationV1,
+    MediaFrameConfigurationV1Params, MediaFrameEnvelopeV1, MediaFrameEnvelopeV1Params,
+    MediaFramePayloadFormat, Operation, ParticipantId, SessionId, SessionMediaIdentityV1,
+    SessionMediaIdentityV1Params, SessionWorkflowMode, SourceId, SubjectId, TakeId, TenantId,
+    MEDIA_CONTROL_MAX_GENERATION,
 };
 
 const VALID_IDENTITY: &[u8] =
@@ -12,6 +17,14 @@ const VALID_CLAIMS: &[u8] =
     include_bytes!("fixtures/media-control/v1/media-capability-claims.json");
 const VALID_DESCRIPTOR: &[u8] =
     include_bytes!("fixtures/media-control/v1/media-endpoint-descriptor.json");
+const VALID_AUTHORIZATION_REQUEST: &[u8] =
+    include_bytes!("fixtures/media-control/v1/media-authorization-request.json");
+const VALID_AUTHORIZATION_FACT: &[u8] =
+    include_bytes!("fixtures/media-control/v1/media-authorization-fact.json");
+const VALID_FRAME_CONFIGURATION: &[u8] =
+    include_bytes!("fixtures/media-control/v1/media-frame-configuration.json");
+const VALID_FRAME_ENVELOPE: &[u8] =
+    include_bytes!("fixtures/media-control/v1/media-frame-envelope.json");
 const FUTURE_CLAIMS: &[u8] =
     include_bytes!("fixtures/media-control/v1/media-capability-future-version.json");
 const NONCANONICAL_CLAIMS: &[u8] =
@@ -24,6 +37,10 @@ const INVALID_TALKBACK_IDENTITY: &[u8] =
     include_bytes!("fixtures/media-control/v1/session-media-identity-talkback-with-source.json");
 const DESCRIPTOR_WITH_SECRET: &[u8] =
     include_bytes!("fixtures/media-control/v1/media-endpoint-descriptor-with-secret.json");
+const AUTHORIZATION_REQUEST_WITH_RELAY_KEY: &[u8] =
+    include_bytes!("fixtures/media-control/v1/media-authorization-request-with-relay-key.json");
+const AUTHORIZATION_FACT_WITH_SUBJECT: &[u8] =
+    include_bytes!("fixtures/media-control/v1/media-authorization-fact-with-subject.json");
 
 fn tenant(value: &str) -> TenantId {
     TenantId::new(value).unwrap()
@@ -55,6 +72,63 @@ fn audience(value: &str) -> AudienceId {
 
 fn edge(value: &str) -> EdgeId {
     EdgeId::new(value).unwrap()
+}
+
+fn subject(value: &str) -> SubjectId {
+    SubjectId::new(value).unwrap()
+}
+
+fn take(value: &str) -> TakeId {
+    TakeId::new(value).unwrap()
+}
+
+fn request_params() -> MediaAuthorizationRequestV1Params {
+    MediaAuthorizationRequestV1Params {
+        subject: subject("sub_zeroth_01"),
+        endpoint_id: endpoint("ep_logic"),
+        requested_operation: Operation::Publish,
+        requested_media_class: MediaClass::Program,
+        requested_source_ids: vec![source("src_mix")],
+        requested_audience_ids: Vec::new(),
+        take_id: None,
+    }
+}
+
+fn fact_params() -> MediaAuthorizationFactV1Params {
+    MediaAuthorizationFactV1Params {
+        authorization_fact_id: AuthorizationFactId::new("maf_01").unwrap(),
+        session_id: session("ses_mix"),
+        session_epoch: 9,
+        media_authorization_epoch: 14,
+        subject_grant_epoch: 3,
+        media_policy_version: 7,
+        participant_id: participant("par_producer"),
+        endpoint_id: endpoint("ep_logic"),
+        effective_role: EffectiveRole::Producer,
+        access_expires_at: Some(1_784_134_800),
+        allowed_operations: vec![
+            Operation::UploadTake,
+            Operation::Subscribe,
+            Operation::AcknowledgePlayout,
+            Operation::ReadTake,
+            Operation::Publish,
+        ],
+        allowed_media_classes: vec![
+            MediaClass::Talkback,
+            MediaClass::Source,
+            MediaClass::TakeChunk,
+            MediaClass::Program,
+            MediaClass::Screen,
+            MediaClass::Metadata,
+        ],
+        allowed_source_ids: vec![source("src_mix")],
+        allowed_audience_ids: Vec::new(),
+        requested_operation: Operation::Publish,
+        requested_media_class: MediaClass::Program,
+        take_id: None,
+        workflow_mode: SessionWorkflowMode::FinalTake,
+        evaluated_at: 1_784_131_200,
+    }
 }
 
 fn claims_params() -> MediaCapabilityClaimsV1Params {
@@ -90,6 +164,46 @@ fn claims_params() -> MediaCapabilityClaimsV1Params {
     }
 }
 
+fn frame_configuration_params() -> MediaFrameConfigurationV1Params {
+    MediaFrameConfigurationV1Params {
+        configuration_id: MediaConfigurationId::new("cfg_talkback_01").unwrap(),
+        binding_generation: 8,
+        configuration_ref: 17,
+        configuration_epoch: 4,
+        identity: SessionMediaIdentityV1::new(SessionMediaIdentityV1Params {
+            tenant_id: tenant("ten_wavey"),
+            session_id: session("ses_mix"),
+            session_epoch: 9,
+            participant_id: participant("par_listener"),
+            endpoint_id: endpoint("ep_browser"),
+            contributor_id: contributor("con_browser"),
+            source_id: None,
+            media_class: MediaClass::Talkback,
+            audience_id: Some(audience("aud_producer_return")),
+            take_id: None,
+            topology_generation: 52,
+        })
+        .unwrap(),
+        payload_format: MediaFramePayloadFormat::Opus,
+        capture_timebase_hz: 48_000,
+        channel_count: 1,
+        max_payload_bytes: 400,
+        capture_disposition: MediaCaptureDisposition::MonitorOnly,
+    }
+}
+
+fn frame_envelope_params() -> MediaFrameEnvelopeV1Params {
+    MediaFrameEnvelopeV1Params {
+        binding_generation: 8,
+        configuration_ref: 17,
+        configuration_epoch: 4,
+        sequence: 9_001,
+        capture_pts: -960,
+        duration_ticks: 960,
+        payload_bytes: 160,
+    }
+}
+
 fn validation_ids() -> (
     TenantId,
     SessionId,
@@ -112,6 +226,41 @@ fn validation_ids() -> (
 
 #[test]
 fn canonical_fixtures_round_trip_byte_for_byte() {
+    let request =
+        MediaAuthorizationRequestV1::from_json_slice(VALID_AUTHORIZATION_REQUEST).unwrap();
+    assert_eq!(
+        request.to_canonical_json_vec().unwrap(),
+        VALID_AUTHORIZATION_REQUEST
+    );
+    assert_eq!(request.subject().as_str(), "sub_zeroth_01");
+    assert_eq!(request.endpoint_id().as_str(), "ep_logic");
+    assert_eq!(request.requested_operation(), Operation::Publish);
+    assert_eq!(request.requested_media_class(), MediaClass::Program);
+    assert_eq!(request.requested_source_ids(), &[source("src_mix")]);
+    assert!(request.requested_audience_ids().is_empty());
+    assert!(request.take_id().is_none());
+
+    let fact = MediaAuthorizationFactV1::from_json_slice(VALID_AUTHORIZATION_FACT).unwrap();
+    assert_eq!(
+        fact.to_canonical_json_vec().unwrap(),
+        VALID_AUTHORIZATION_FACT
+    );
+    assert_eq!(fact.authorization_fact_id().as_str(), "maf_01");
+    assert_eq!(fact.session_id().as_str(), "ses_mix");
+    assert_eq!(fact.session_epoch(), 9);
+    assert_eq!(fact.media_authorization_epoch(), 14);
+    assert_eq!(fact.subject_grant_epoch(), 3);
+    assert_eq!(fact.media_policy_version(), 7);
+    assert_eq!(fact.participant_id().as_str(), "par_producer");
+    assert_eq!(fact.endpoint_id().as_str(), "ep_logic");
+    assert_eq!(fact.effective_role(), EffectiveRole::Producer);
+    assert_eq!(fact.access_expires_at(), Some(1_784_134_800));
+    assert_eq!(fact.requested_operation(), Operation::Publish);
+    assert_eq!(fact.requested_media_class(), MediaClass::Program);
+    assert_eq!(fact.workflow_mode(), SessionWorkflowMode::FinalTake);
+    assert_eq!(fact.evaluated_at(), 1_784_131_200);
+    assert!(fact.take_id().is_none());
+
     let identity = SessionMediaIdentityV1::from_json_slice(VALID_IDENTITY).unwrap();
     assert_eq!(identity.to_canonical_json_vec().unwrap(), VALID_IDENTITY);
 
@@ -130,6 +279,22 @@ fn canonical_fixtures_round_trip_byte_for_byte() {
         descriptor.to_canonical_json_vec().unwrap(),
         VALID_DESCRIPTOR
     );
+
+    let configuration =
+        MediaFrameConfigurationV1::from_json_slice(VALID_FRAME_CONFIGURATION).unwrap();
+    assert_eq!(
+        configuration.to_canonical_json_vec().unwrap(),
+        VALID_FRAME_CONFIGURATION
+    );
+    let envelope = MediaFrameEnvelopeV1::from_json_slice(VALID_FRAME_ENVELOPE).unwrap();
+    assert_eq!(
+        envelope.to_canonical_json_vec().unwrap(),
+        VALID_FRAME_ENVELOPE
+    );
+    assert_eq!(
+        envelope.resolve(&configuration).unwrap().media_class(),
+        MediaClass::Talkback
+    );
 }
 
 #[test]
@@ -140,15 +305,30 @@ fn workspace_documentation_mirrors_the_core_canonical_fixtures() {
         return;
     }
     for (name, expected) in [
+        (
+            "media-authorization-request.json",
+            VALID_AUTHORIZATION_REQUEST,
+        ),
+        ("media-authorization-fact.json", VALID_AUTHORIZATION_FACT),
         ("session-media-identity.json", VALID_IDENTITY),
         ("media-capability-claims.json", VALID_CLAIMS),
         ("media-endpoint-descriptor.json", VALID_DESCRIPTOR),
+        ("media-frame-configuration.json", VALID_FRAME_CONFIGURATION),
+        ("media-frame-envelope.json", VALID_FRAME_ENVELOPE),
     ] {
         assert_eq!(std::fs::read(docs.join(name)).unwrap(), expected, "{name}");
     }
 
     let invalid = docs.join("../invalid");
     for (name, expected) in [
+        (
+            "media-authorization-request-with-relay-key.json",
+            AUTHORIZATION_REQUEST_WITH_RELAY_KEY,
+        ),
+        (
+            "media-authorization-fact-with-subject.json",
+            AUTHORIZATION_FACT_WITH_SUBJECT,
+        ),
         ("media-capability-future-version.json", FUTURE_CLAIMS),
         (
             "media-capability-noncanonical-edge-order.json",
@@ -175,6 +355,43 @@ fn workspace_documentation_mirrors_the_core_canonical_fixtures() {
 
 #[test]
 fn constructors_canonicalize_sets_but_wire_input_must_already_be_canonical() {
+    let mut request = request_params();
+    request.requested_source_ids = vec![source("src_z"), source("src_a")];
+    let request = MediaAuthorizationRequestV1::new(request).unwrap();
+    assert_eq!(
+        request.requested_source_ids(),
+        &[source("src_a"), source("src_z")]
+    );
+
+    let fact = MediaAuthorizationFactV1::new(fact_params()).unwrap();
+    assert_eq!(
+        fact.to_canonical_json_vec().unwrap(),
+        VALID_AUTHORIZATION_FACT
+    );
+    assert_eq!(
+        fact.allowed_operations(),
+        &[
+            Operation::AcknowledgePlayout,
+            Operation::Publish,
+            Operation::ReadTake,
+            Operation::Subscribe,
+            Operation::UploadTake,
+        ]
+    );
+    assert_eq!(
+        fact.allowed_media_classes(),
+        &[
+            MediaClass::Metadata,
+            MediaClass::Program,
+            MediaClass::Screen,
+            MediaClass::Source,
+            MediaClass::TakeChunk,
+            MediaClass::Talkback,
+        ]
+    );
+    assert_eq!(fact.allowed_source_ids(), &[source("src_mix")]);
+    assert!(fact.allowed_audience_ids().is_empty());
+
     let mut params = claims_params();
     params.source_ids = vec![source("src_z"), source("src_a")];
     let claims = MediaCapabilityClaimsV1::new(params).unwrap();
@@ -189,7 +406,391 @@ fn constructors_canonicalize_sets_but_wire_input_must_already_be_canonical() {
 }
 
 #[test]
+fn authorization_wire_sets_must_be_canonical_and_unique() {
+    let noncanonical_request = String::from_utf8(VALID_AUTHORIZATION_REQUEST.to_vec())
+        .unwrap()
+        .replace("[\"src_mix\"]", "[\"src_z\",\"src_a\"]");
+    assert_eq!(
+        MediaAuthorizationRequestV1::from_json_slice(noncanonical_request.as_bytes())
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::NonCanonicalOrder
+    );
+
+    let noncanonical_fact = String::from_utf8(VALID_AUTHORIZATION_FACT.to_vec())
+        .unwrap()
+        .replace(
+            "[\"acknowledge_playout\",\"publish\",\"read_take\",\"subscribe\",\"upload_take\"]",
+            "[\"publish\",\"acknowledge_playout\",\"read_take\",\"subscribe\",\"upload_take\"]",
+        );
+    assert_eq!(
+        MediaAuthorizationFactV1::from_json_slice(noncanonical_fact.as_bytes())
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::NonCanonicalOrder
+    );
+
+    let mut duplicate_request = request_params();
+    duplicate_request.requested_audience_ids = vec![audience("aud_return"), audience("aud_return")];
+    assert_eq!(
+        MediaAuthorizationRequestV1::new(duplicate_request)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::DuplicateValue
+    );
+
+    let mut duplicate_fact = fact_params();
+    duplicate_fact.allowed_operations[0] = Operation::Publish;
+    assert_eq!(
+        MediaAuthorizationFactV1::new(duplicate_fact)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::DuplicateValue
+    );
+}
+
+#[test]
+fn authorization_objects_are_closed_and_required_nullable_fields_stay_required() {
+    assert_eq!(
+        MediaAuthorizationRequestV1::from_json_slice(AUTHORIZATION_REQUEST_WITH_RELAY_KEY)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::MalformedJson
+    );
+    assert_eq!(
+        MediaAuthorizationFactV1::from_json_slice(AUTHORIZATION_FACT_WITH_SUBJECT)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::MalformedJson
+    );
+
+    let mut request: serde_json::Value =
+        serde_json::from_slice(VALID_AUTHORIZATION_REQUEST).unwrap();
+    request
+        .as_object_mut()
+        .unwrap()
+        .remove("requested_source_ids");
+    assert_eq!(
+        MediaAuthorizationRequestV1::from_json_slice(&serde_json::to_vec(&request).unwrap())
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::MalformedJson
+    );
+
+    let mut request_without_optional_take: serde_json::Value =
+        serde_json::from_slice(VALID_AUTHORIZATION_REQUEST).unwrap();
+    request_without_optional_take
+        .as_object_mut()
+        .unwrap()
+        .remove("take_id");
+    assert_eq!(
+        MediaAuthorizationRequestV1::from_json_slice(
+            &serde_json::to_vec(&request_without_optional_take).unwrap()
+        )
+        .unwrap_err()
+        .code(),
+        MediaControlErrorCode::MalformedJson
+    );
+
+    let mut request_with_null_take: serde_json::Value =
+        serde_json::from_slice(VALID_AUTHORIZATION_REQUEST).unwrap();
+    request_with_null_take["take_id"] = serde_json::Value::Null;
+    assert!(MediaAuthorizationRequestV1::from_json_slice(
+        &serde_json::to_vec(&request_with_null_take).unwrap()
+    )
+    .unwrap()
+    .take_id()
+    .is_none());
+
+    let mut fact: serde_json::Value = serde_json::from_slice(VALID_AUTHORIZATION_FACT).unwrap();
+    fact.as_object_mut().unwrap().remove("access_expires_at");
+    assert_eq!(
+        MediaAuthorizationFactV1::from_json_slice(&serde_json::to_vec(&fact).unwrap())
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::MalformedJson
+    );
+
+    let mut fact_with_null_expiry: serde_json::Value =
+        serde_json::from_slice(VALID_AUTHORIZATION_FACT).unwrap();
+    fact_with_null_expiry["access_expires_at"] = serde_json::Value::Null;
+    assert!(MediaAuthorizationFactV1::from_json_slice(
+        &serde_json::to_vec(&fact_with_null_expiry).unwrap()
+    )
+    .unwrap()
+    .access_expires_at()
+    .is_none());
+    let mut fact: serde_json::Value = serde_json::from_slice(VALID_AUTHORIZATION_FACT).unwrap();
+    fact.as_object_mut().unwrap().remove("take_id");
+    assert_eq!(
+        MediaAuthorizationFactV1::from_json_slice(&serde_json::to_vec(&fact).unwrap())
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::MalformedJson
+    );
+
+    let oversized = vec![b' '; 64 * 1024 + 1];
+    assert_eq!(
+        MediaAuthorizationRequestV1::from_json_slice(&oversized)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::LimitExceeded
+    );
+}
+
+#[test]
+fn optional_identity_and_capability_members_are_absent_only() {
+    for field in ["source_id", "audience_id", "take_id"] {
+        let mut value: serde_json::Value = serde_json::from_slice(VALID_IDENTITY).unwrap();
+        value[field] = serde_json::Value::Null;
+        assert_eq!(
+            SessionMediaIdentityV1::from_json_slice(&serde_json::to_vec(&value).unwrap())
+                .unwrap_err()
+                .code(),
+            MediaControlErrorCode::MalformedJson,
+            "identity field {field} accepted explicit null"
+        );
+    }
+
+    for field in [
+        "class_authorization_epoch",
+        "contributor_id",
+        "take_id",
+        "client_key_thumbprint",
+    ] {
+        let mut value: serde_json::Value = serde_json::from_slice(VALID_CLAIMS).unwrap();
+        value[field] = serde_json::Value::Null;
+        assert_eq!(
+            MediaCapabilityClaimsV1::from_json_slice(&serde_json::to_vec(&value).unwrap())
+                .unwrap_err()
+                .code(),
+            MediaControlErrorCode::MalformedJson,
+            "capability field {field} accepted explicit null"
+        );
+    }
+}
+
+#[test]
+fn compact_frames_resolve_only_against_the_exact_authenticated_configuration() {
+    let configuration = MediaFrameConfigurationV1::new(frame_configuration_params()).unwrap();
+    let envelope = MediaFrameEnvelopeV1::new(frame_envelope_params()).unwrap();
+    let identity = envelope.resolve(&configuration).unwrap();
+    assert_eq!(identity.session_id().as_str(), "ses_mix");
+    assert_eq!(identity.session_epoch(), 9);
+    assert_eq!(identity.contributor_id().as_str(), "con_browser");
+    assert_eq!(
+        identity.audience_id().unwrap().as_str(),
+        "aud_producer_return"
+    );
+    assert_eq!(identity.media_class(), MediaClass::Talkback);
+
+    for mutate in [
+        |params: &mut MediaFrameEnvelopeV1Params| params.binding_generation += 1,
+        |params: &mut MediaFrameEnvelopeV1Params| params.configuration_ref += 1,
+        |params: &mut MediaFrameEnvelopeV1Params| params.configuration_epoch += 1,
+    ] {
+        let mut params = frame_envelope_params();
+        mutate(&mut params);
+        assert_eq!(
+            MediaFrameEnvelopeV1::new(params)
+                .unwrap()
+                .resolve(&configuration)
+                .unwrap_err()
+                .code(),
+            MediaControlErrorCode::ConfigurationMismatch
+        );
+    }
+
+    let mut oversized = frame_envelope_params();
+    oversized.payload_bytes = configuration.max_payload_bytes() + 1;
+    assert_eq!(
+        MediaFrameEnvelopeV1::new(oversized)
+            .unwrap()
+            .resolve(&configuration)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::ConfigurationMismatch
+    );
+}
+
+#[test]
+fn frame_contract_enforces_capture_and_format_boundaries() {
+    let mut recordable_talkback = frame_configuration_params();
+    recordable_talkback.capture_disposition = MediaCaptureDisposition::Recordable;
+    assert_eq!(
+        MediaFrameConfigurationV1::new(recordable_talkback)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+
+    let mut stereo_talkback = frame_configuration_params();
+    stereo_talkback.channel_count = 2;
+    assert_eq!(
+        MediaFrameConfigurationV1::new(stereo_talkback)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+
+    let mut wrong_opus_clock = frame_configuration_params();
+    wrong_opus_clock.capture_timebase_hz = 44_100;
+    assert_eq!(
+        MediaFrameConfigurationV1::new(wrong_opus_clock)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+
+    let mut unsafe_sequence = frame_envelope_params();
+    unsafe_sequence.sequence = MEDIA_CONTROL_MAX_GENERATION + 1;
+    assert_eq!(
+        MediaFrameEnvelopeV1::new(unsafe_sequence)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::LimitExceeded
+    );
+
+    let mut unsafe_pts = frame_envelope_params();
+    unsafe_pts.capture_pts = -i64::try_from(MEDIA_CONTROL_MAX_GENERATION)
+        .expect("the compiled media-control generation bound fits in i64")
+        - 1;
+    assert_eq!(
+        MediaFrameEnvelopeV1::new(unsafe_pts).unwrap_err().code(),
+        MediaControlErrorCode::LimitExceeded
+    );
+
+    let mut future: serde_json::Value = serde_json::from_slice(VALID_FRAME_ENVELOPE).unwrap();
+    future["version"] = serde_json::json!(2);
+    assert_eq!(
+        MediaFrameEnvelopeV1::from_json_slice(&serde_json::to_vec(&future).unwrap())
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::UnsupportedVersion
+    );
+}
+
+#[test]
+fn authorization_requests_enforce_operation_class_and_take_invariants() {
+    let mut upload_without_take = request_params();
+    upload_without_take.requested_operation = Operation::UploadTake;
+    upload_without_take.requested_media_class = MediaClass::TakeChunk;
+    assert_eq!(
+        MediaAuthorizationRequestV1::new(upload_without_take)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+
+    let mut live_with_take = request_params();
+    live_with_take.take_id = Some(take("take_private"));
+    assert_eq!(
+        MediaAuthorizationRequestV1::new(live_with_take)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+
+    let mut invalid_ack = request_params();
+    invalid_ack.requested_operation = Operation::AcknowledgePlayout;
+    invalid_ack.requested_media_class = MediaClass::Metadata;
+    assert_eq!(
+        MediaAuthorizationRequestV1::new(invalid_ack)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+
+    let mut upload = request_params();
+    upload.requested_operation = Operation::UploadTake;
+    upload.requested_media_class = MediaClass::TakeChunk;
+    upload.take_id = Some(take("take_01"));
+    assert!(MediaAuthorizationRequestV1::new(upload).is_ok());
+}
+
+#[test]
+fn authorization_facts_enforce_safe_generations_timestamps_and_semantics() {
+    let mut zero_generation = fact_params();
+    zero_generation.session_epoch = 0;
+    assert_eq!(
+        MediaAuthorizationFactV1::new(zero_generation)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidGeneration
+    );
+
+    let mut inexact_generation = fact_params();
+    inexact_generation.media_policy_version = MEDIA_CONTROL_MAX_GENERATION + 1;
+    assert_eq!(
+        MediaAuthorizationFactV1::new(inexact_generation)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidGeneration
+    );
+
+    let mut negative_timestamp = fact_params();
+    negative_timestamp.evaluated_at = -1;
+    assert_eq!(
+        MediaAuthorizationFactV1::new(negative_timestamp)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidTimestamp
+    );
+
+    let mut inexact_timestamp = fact_params();
+    inexact_timestamp.access_expires_at = Some(9_007_199_254_740_992);
+    assert_eq!(
+        MediaAuthorizationFactV1::new(inexact_timestamp)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidTimestamp
+    );
+
+    let mut missing_allowed_operation = fact_params();
+    missing_allowed_operation
+        .allowed_operations
+        .retain(|operation| *operation != Operation::Publish);
+    assert_eq!(
+        MediaAuthorizationFactV1::new(missing_allowed_operation)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+
+    let mut take_outside_final_take = fact_params();
+    take_outside_final_take.requested_operation = Operation::ReadTake;
+    take_outside_final_take.requested_media_class = MediaClass::TakeChunk;
+    take_outside_final_take.take_id = Some(take("take_01"));
+    take_outside_final_take.workflow_mode = SessionWorkflowMode::MixReview;
+    assert_eq!(
+        MediaAuthorizationFactV1::new(take_outside_final_take)
+            .unwrap_err()
+            .code(),
+        MediaControlErrorCode::InvalidCombination
+    );
+}
+
+#[test]
 fn future_versions_and_unknown_fields_fail_closed() {
+    for error in [
+        MediaAuthorizationRequestV1::from_json_slice(
+            String::from_utf8(VALID_AUTHORIZATION_REQUEST.to_vec())
+                .unwrap()
+                .replacen("\"version\":1", "\"version\":2", 1)
+                .as_bytes(),
+        )
+        .unwrap_err(),
+        MediaAuthorizationFactV1::from_json_slice(
+            String::from_utf8(VALID_AUTHORIZATION_FACT.to_vec())
+                .unwrap()
+                .replacen("\"version\":1", "\"version\":2", 1)
+                .as_bytes(),
+        )
+        .unwrap_err(),
+    ] {
+        assert_eq!(error.code(), MediaControlErrorCode::UnsupportedVersion);
+    }
+
     assert_eq!(
         MediaCapabilityClaimsV1::from_json_slice(FUTURE_CLAIMS)
             .unwrap_err()
@@ -477,6 +1078,29 @@ fn endpoint_descriptors_are_closed_non_authorizing_routes() {
 
 #[test]
 fn safe_debug_views_do_not_contain_identity_or_route_values() {
+    let request = MediaAuthorizationRequestV1::new(request_params()).unwrap();
+    let debug = format!("{request:?}");
+    for forbidden in ["sub_zeroth_01", "ep_logic", "src_mix"] {
+        assert!(!debug.contains(forbidden));
+    }
+    assert!(debug.contains("requested_source_count: 1"));
+
+    let fact = MediaAuthorizationFactV1::new(fact_params()).unwrap();
+    let debug = format!("{fact:?}");
+    for forbidden in [
+        "maf_01",
+        "ses_mix",
+        "par_producer",
+        "ep_logic",
+        "src_mix",
+        "Producer",
+        "1784134800",
+    ] {
+        assert!(!debug.contains(forbidden));
+    }
+    let fact_json = String::from_utf8(fact.to_canonical_json_vec().unwrap()).unwrap();
+    assert!(!fact_json.contains("\"subject\""));
+
     let claims = MediaCapabilityClaimsV1::new(claims_params()).unwrap();
     let debug = format!("{claims:?}");
     for forbidden in ["ses_mix", "src_mix", "edge_ams", "cap_publish_mix"] {

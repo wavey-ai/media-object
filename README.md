@@ -25,7 +25,13 @@ The crate also exposes strict JSON types for the control-plane boundary:
   authorization, per-subject grant, policy, optional class authorization,
   binding, and topology generations;
 - `MediaEndpointDescriptorV1` is a closed, HTTPS-only route locator with no
-  token, key, header, cookie, query value, or arbitrary parameter map.
+  token, key, header, cookie, query value, or arbitrary parameter map;
+- `MediaFrameConfigurationV1` authenticates the complete session/media
+  identity, payload format, capture timebase, and recording disposition behind
+  one compact binding-scoped reference;
+- `MediaFrameEnvelopeV1` carries that reference plus exact sequence, mandatory
+  capture PTS, duration, configuration epoch, and payload length on every
+  high-rate frame.
 
 Opaque IDs are typed, bounded ASCII tokens. Constructors canonicalize set-like
 scopes; JSON input must already use canonical ordering and rejects unknown
@@ -36,6 +42,12 @@ including exact generations and a maximum five-second clock-skew allowance.
 Capability lifetime is capped at 90 seconds. Signature/header, key selection,
 and replay checks remain the issuer/verifier's responsibility and happen before
 claims authorization.
+
+`MediaFrameEnvelopeV1::resolve` is mandatory before parsing or routing frame
+payload. It fails closed unless binding generation, configuration reference,
+configuration epoch, and payload bound match the authenticated configuration
+exactly. Talkback configurations are fixed to mono 48 kHz Opus and
+`monitor_only`; they cannot be relabelled recordable.
 
 Core values and IDs use redacted `Debug` output. Explicit serialization and
 identifier `as_str()` access are trust-boundary operations.

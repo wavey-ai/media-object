@@ -11,17 +11,23 @@ mod model;
 mod wire;
 
 pub use control::{
-    AudienceId, CapabilityId, ContributorId, DescriptorId, EdgeId, EndpointId,
-    LiveMonitorTransport, MediaCapabilityClaimsV1, MediaCapabilityClaimsV1Params,
-    MediaCapabilityTokenType, MediaCapabilityValidationContextV1, MediaClass, MediaControlError,
-    MediaControlErrorCode, MediaControlResult, MediaEndpointDescriptorV1,
-    MediaEndpointDescriptorV1Params, MediaEndpointTransport, Operation, ParticipantId,
-    RedactedMediaCapabilityClaimsV1, RedactedMediaEndpointDescriptorV1,
-    RedactedSessionMediaIdentityV1, SessionId, SessionMediaIdentityV1,
-    SessionMediaIdentityV1Params, SessionWorkflowMode, SourceId, TakeId, TenantId,
-    MEDIA_CONTROL_MAX_CAPABILITY_LIFETIME_SECONDS, MEDIA_CONTROL_MAX_CLOCK_SKEW_SECONDS,
-    MEDIA_CONTROL_MAX_GENERATION, MEDIA_CONTROL_MAX_ID_BYTES, MEDIA_CONTROL_MAX_JSON_BYTES,
-    MEDIA_CONTROL_MAX_SCOPE_IDS, MEDIA_CONTROL_VERSION_V1,
+    AudienceId, AuthorizationFactId, CapabilityId, ContributorId, DescriptorId, EdgeId,
+    EffectiveRole, EndpointId, LiveMonitorTransport, MediaAuthorizationFactV1,
+    MediaAuthorizationFactV1Params, MediaAuthorizationRequestV1, MediaAuthorizationRequestV1Params,
+    MediaCapabilityClaimsV1, MediaCapabilityClaimsV1Params, MediaCapabilityTokenType,
+    MediaCapabilityValidationContextV1, MediaCaptureDisposition, MediaClass, MediaConfigurationId,
+    MediaControlError, MediaControlErrorCode, MediaControlResult, MediaEndpointDescriptorV1,
+    MediaEndpointDescriptorV1Params, MediaEndpointTransport, MediaFrameConfigurationV1,
+    MediaFrameConfigurationV1Params, MediaFrameEnvelopeV1, MediaFrameEnvelopeV1Params,
+    MediaFramePayloadFormat, Operation, ParticipantId, RedactedMediaAuthorizationFactV1,
+    RedactedMediaAuthorizationRequestV1, RedactedMediaCapabilityClaimsV1,
+    RedactedMediaEndpointDescriptorV1, RedactedMediaFrameConfigurationV1,
+    RedactedMediaFrameEnvelopeV1, RedactedSessionMediaIdentityV1, SessionId,
+    SessionMediaIdentityV1, SessionMediaIdentityV1Params, SessionWorkflowMode, SourceId, SubjectId,
+    TakeId, TenantId, MEDIA_CONTROL_MAX_CAPABILITY_LIFETIME_SECONDS,
+    MEDIA_CONTROL_MAX_CLOCK_SKEW_SECONDS, MEDIA_CONTROL_MAX_GENERATION, MEDIA_CONTROL_MAX_ID_BYTES,
+    MEDIA_CONTROL_MAX_JSON_BYTES, MEDIA_CONTROL_MAX_SCOPE_IDS, MEDIA_CONTROL_VERSION_V1,
+    MEDIA_FRAME_MAX_PAYLOAD_BYTES, MEDIA_FRAME_MAX_TIMEBASE_HZ,
 };
 pub use error::{Error, Result};
 pub use model::{
